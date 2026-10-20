@@ -1,0 +1,8 @@
+{
+  "chromePath": "/home/you/.cache/ms-playwright/chromium-1200/chrome-linux64/chrome",
+  "extraArgs": [],
+  "defaultViewport": "desktop",
+  "ignoreHttpsErrors": false,
+  "maxTabs": 10,
+  "screencastQuality": 70
+}

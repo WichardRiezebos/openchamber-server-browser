@@ -1,0 +1,45 @@
+{
+  "name": "openchamber-server-browser",
+  "version": "0.1.0",
+  "description": "OpenChamber extension: a real headless Chromium on the OpenChamber host that agents drive and you watch live in the panel.",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "author": "Wichard Riezebos",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/WichardRiezebos/openchamber-server-browser.git"
+  },
+  "openchamber": {
+    "apiVersion": 1,
+    "engines": {
+      "openchamber": ">=2.0.1"
+    },
+    "contributes": {
+      "panel": {
+        "id": "server-browser",
+        "name": "Server Browser",
+        "icon": "global",
+        "entry": "panel/index.html",
+        "dock": "top",
+        "size": 40
+      },
+      "service": {
+        "entry": "service/main.js",
+        "runtime": "host",
+        "provides": ["browser"],
+        "surface": true
+      }
+    }
+  },
+  "scripts": {
+    "build": "bun scripts/build.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node test/smoke.mjs"
+  },
+  "devDependencies": {
+    "@openchamber/sdk": "^2.5.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}
