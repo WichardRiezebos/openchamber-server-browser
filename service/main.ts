@@ -3,6 +3,7 @@
 // - `POST /browser-control`: the agent's browser actions (provides: ["browser"]).
 // - `/surface/*`: the live picture in the rail panel, and the person's input.
 // - `/state`, `/navigate`, `/tab`, `/nav`, `/viewport`: the address bar docked above it.
+import { timingSafeEqual } from 'node:crypto';
 import http from 'node:http';
 
 import {
@@ -40,8 +41,13 @@ if (!port || !token) {
   console.error('OPENCHAMBER_SERVICE_PORT and OPENCHAMBER_SERVICE_TOKEN are required');
   process.exit(1);
 }
+const expectedAuthorization = Buffer.from(`Bearer ${token}`, 'utf8');
 
 const browser = new ServerBrowser();
+
+/** Largest ordinary request body; agent actions may carry page-sized payloads. */
+const MAX_BODY = 1_000_000;
+const MAX_ACTION_BODY = 2_000_000;
 
 // One agent action at a time: actions from several chats would otherwise
 // interleave clicks and typing on the same page.
@@ -52,7 +58,7 @@ const serialized = <T>(work: () => Promise<T>): Promise<T> => {
   return next;
 };
 
-const readBody = (req: http.IncomingMessage, limit = 1_000_000): Promise<string> => new Promise((resolve, reject) => {
+const readBody = (req: http.IncomingMessage, limit = MAX_BODY): Promise<string> => new Promise((resolve, reject) => {
   const chunks: Buffer[] = [];
   let size = 0;
   req.on('data', (chunk: Buffer) => {
@@ -86,7 +92,7 @@ const parseJson = (text: string): Record<string, unknown> | null => {
 // ---- Agent actions ----
 
 const handleBrowserControl = async (req: http.IncomingMessage, res: http.ServerResponse): Promise<void> => {
-  const request = readBrowserProviderRequest(await readBody(req, 2_000_000));
+  const request = readBrowserProviderRequest(await readBody(req, MAX_ACTION_BODY));
   if (!request) {
     sendJson(res, 400, { ok: false, error: 'Not a browser action' });
     return;
@@ -125,7 +131,10 @@ const handleFrame = async (res: http.ServerResponse, url: URL): Promise<void> =>
   const headers: http.OutgoingHttpHeaders = {
     'Content-Type': frame.mime,
     'Content-Length': frame.bytes.length,
-    [SURFACE_SEQ_HEADER]: String(browser.seq),
+    // The seq the picture was captured at, not the current one: seq also bumps
+    // without a new frame (an agent going active), and the header must describe
+    // these bytes, not whatever happened since.
+    [SURFACE_SEQ_HEADER]: String(frame.seq),
     [SURFACE_WIDTH_HEADER]: String(frame.width),
     [SURFACE_HEIGHT_HEADER]: String(frame.height),
     // Header values must be Latin-1; anything else is dropped from the title.
@@ -253,6 +262,9 @@ const normalizeAddress = (input: string): string => {
   // `host:port/path` also looks like `scheme:…`, so only `scheme://` and a few
   // schemes without slashes count as already complete.
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value) || /^(about|data|blob|view-source):/i.test(value)) return value;
+  // An IPv6 literal (`[::1]:3000`) splits on colons all wrong below; a bracketed
+  // address is a machine on this host, so plain http.
+  if (value.startsWith('[')) return `http://${value}`;
   // Bare host names: local ones over http, everything else over https.
   const host = value.split('/')[0].split(':')[0];
   const local = host === 'localhost' || host.endsWith('.localhost') || /^\d+\.\d+\.\d+\.\d+$/.test(host) || host.endsWith('.test');
@@ -300,7 +312,9 @@ const handleDock = async (req: http.IncomingMessage, res: http.ServerResponse, u
         return true;
       }
       if (!tab) throw new Error('No tab is open.');
-      void browser.navigate(tab, normalizeAddress(address), 30_000).catch(() => undefined);
+      // Fire-and-forget so the dock answers at once; the failure still shows
+      // somewhere, in the service log.
+      void browser.navigate(tab, normalizeAddress(address), 30_000).catch((error: Error) => console.error('navigate failed:', error.message));
     } else if (url.pathname === '/tab') {
       const id = typeof body.id === 'string' ? body.id : '';
       if (!browser.tabs.has(id)) throw new Error(`No tab ${id}`);
@@ -328,7 +342,10 @@ const handleDock = async (req: http.IncomingMessage, res: http.ServerResponse, u
 // ---- Server ----
 
 const server = http.createServer((req, res) => {
-  if (req.headers.authorization !== `Bearer ${token}`) {
+  // Constant-time compare with a length guard (timingSafeEqual throws on
+  // unequal lengths), so the check does not leak the token one byte at a time.
+  const given = Buffer.from(req.headers.authorization ?? '', 'utf8');
+  if (given.length !== expectedAuthorization.length || !timingSafeEqual(given, expectedAuthorization)) {
     sendJson(res, 401, { ok: false, error: 'unauthorized' });
     return;
   }
@@ -352,6 +369,9 @@ const server = http.createServer((req, res) => {
   });
 });
 
+// A listen failure (port taken, host unreachable) would otherwise become an
+// unhandled 'error' event that kills the process without a word.
+server.on('error', (error) => { console.error('service failed:', (error as Error).message); process.exit(1); });
 server.listen(port, '127.0.0.1');
 
 let stopping = false;

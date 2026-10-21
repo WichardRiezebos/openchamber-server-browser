@@ -38,7 +38,12 @@ const readJson = (file: string): Record<string, unknown> => {
   try {
     const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
-  } catch {
+  } catch (error) {
+    // A missing file is the normal case; anything else (bad JSON, no read
+    // permission) would otherwise silently pass as empty settings.
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      console.warn(`openchamber-server-browser: ignoring ${file}: ${(error as Error).message}`);
+    }
     return {};
   }
 };

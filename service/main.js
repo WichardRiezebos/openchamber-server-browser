@@ -1,5 +1,6 @@
 // Built from service/*.ts by scripts/build.ts. Edit the sources, not this file.
 // service/main.ts
+import { timingSafeEqual } from "node:crypto";
 import http from "node:http";
 // node_modules/@openchamber/sdk/dist/scrollbar-style.js
 var GUEST_SCROLLING_ATTRIBUTE = "data-oc-scrolling";
@@ -275,6 +276,7 @@ var readSurfaceResizeRequest = (body) => {
 var MAX_TEXT_CHARS = 6000;
 var MAX_ELEMENTS = 120;
 var MAX_LABEL_CHARS = 80;
+var SCAN_CAP = 2000;
 var SCROLL_SETTLE_MAX_MS = 100;
 var HELPERS = `
   var MAX_ELEMENTS = ${MAX_ELEMENTS};
@@ -407,7 +409,10 @@ var buildSnapshotScript = ({ selector } = {}) => wrap(`
   var interactive = root.querySelectorAll('a[href], button, input, select, textarea, [role="button"], [role="link"], [role="tab"], [contenteditable="true"]');
   var elements = [];
   var visibleTotal = 0;
+  var scanCapped = false;
   for (var i = 0; i < interactive.length; i += 1) {
+    // Stop walking instead of measuring forever: what was scanned is reported.
+    if (i >= ${SCAN_CAP}) { scanCapped = true; break; }
     var element = interactive[i];
     if (!visible(element)) continue;
     visibleTotal += 1;
@@ -462,6 +467,7 @@ var buildSnapshotScript = ({ selector } = {}) => wrap(`
     result.elementsTruncated = true;
     result.interactiveElementsOnPage = visibleTotal;
   }
+  if (scanCapped) result.scanCapped = true;
   return result;
 `);
 var buildClickScript = ({ selector, text }) => wrap(`
@@ -1051,7 +1057,10 @@ var readJson = (file) => {
   try {
     const parsed = JSON.parse(readFileSync(file, "utf8"));
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      console.warn(`openchamber-server-browser: ignoring ${file}: ${error.message}`);
+    }
     return {};
   }
 };
@@ -1150,6 +1159,8 @@ var VIEWPORTS = {
 };
 var FILL_FALLBACK = { width: 1280, height: 800 };
 var CONSOLE_KEEP = 30;
+var SETTLE_MS = 200;
+var POST_LOAD_MS = 250;
 var SCREENCAST_IDLE_MS = 5000;
 var START_PAGE = `data:text/html;charset=utf-8,${encodeURIComponent(`<!doctype html><html><head><title>Server Browser</title>
 <meta name="color-scheme" content="light dark"><style>
@@ -1401,7 +1412,7 @@ class ServerBrowser {
         if (!tab.mainFrameId || params.frameId === tab.mainFrameId) {
           tab.loading = false;
           for (const wake of tab.stopWaiters.splice(0))
-            wake();
+            wake(true);
         }
         break;
       case "Page.frameNavigated":
@@ -1427,6 +1438,7 @@ class ServerBrowser {
             bytes,
             mime: "image/jpeg",
             ...size,
+            seq: 0,
             cssWidth: params.metadata?.deviceWidth ?? tab.width,
             cssHeight: params.metadata?.deviceHeight ?? tab.height
           });
@@ -1540,7 +1552,7 @@ class ServerBrowser {
     this.byTarget.delete(tab.targetId);
     this.bySession.delete(tab.sessionId);
     for (const wake of tab.stopWaiters.splice(0))
-      wake();
+      wake(false);
     if (this.shownTabId === tab.id) {
       this.shownTabId = null;
       const next = [...this.tabs.values()].sort((a, b) => b.lastUsed - a.lastUsed)[0];
@@ -1588,8 +1600,9 @@ class ServerBrowser {
     await this.trimTabs();
     this.creating += 1;
     let tab;
+    let targetId = "";
     try {
-      const { targetId } = await this.send("Target.createTarget", { url: "about:blank", background: true });
+      targetId = (await this.send("Target.createTarget", { url: "about:blank", background: true })).targetId;
       tab = this.byTarget.get(targetId) ?? await Promise.race([
         new Promise((resolve) => {
           this.attachWaiters.set(targetId, resolve);
@@ -1598,8 +1611,9 @@ class ServerBrowser {
           throw new Error("The new tab did not start.");
         })
       ]);
-      this.attachWaiters.delete(targetId);
     } finally {
+      if (targetId)
+        this.attachWaiters.delete(targetId);
       this.creating -= 1;
     }
     await tab.ready;
@@ -1642,9 +1656,9 @@ class ServerBrowser {
       return Promise.resolve(true);
     return new Promise((resolve) => {
       const timer = setTimeout(() => resolve(false), timeoutMs);
-      tab.stopWaiters.push(() => {
+      tab.stopWaiters.push((stopped) => {
         clearTimeout(timer);
-        resolve(true);
+        resolve(stopped);
       });
     });
   }
@@ -1661,16 +1675,16 @@ class ServerBrowser {
     tab.loading = true;
     const settled = await this.waitForStop(tab, timeoutMs);
     if (settled)
-      await sleep(250);
+      await sleep(POST_LOAD_MS);
     return { settled };
   }
   async withNavigation(tab, action, timeoutMs = 1e4) {
     const before = tab.loadSeq;
     const result = await action();
-    await sleep(200);
+    await sleep(SETTLE_MS);
     if (tab.loadSeq !== before || tab.loading) {
       if (await this.waitForStop(tab, timeoutMs))
-        await sleep(200);
+        await sleep(SETTLE_MS);
     }
     return result;
   }
@@ -1769,7 +1783,7 @@ class ServerBrowser {
       const bytes = await this.screenshot(tab, "jpeg");
       const size = imageSize(bytes) ?? { width: tab.width, height: tab.height };
       if (tab.id === this.shownTabId) {
-        this.setFrame({ bytes, mime: "image/jpeg", ...size, cssWidth: tab.width, cssHeight: tab.height });
+        this.setFrame({ bytes, mime: "image/jpeg", ...size, seq: 0, cssWidth: tab.width, cssHeight: tab.height });
       }
     } catch {}
     await this.send("Page.startScreencast", {
@@ -1812,6 +1826,8 @@ class ServerBrowser {
   }
   touch() {
     this.seq += 1;
+    if (this.frame)
+      this.frame.seq = this.seq;
     for (const wake of this.frameWaiters.splice(0))
       wake();
   }
@@ -2014,7 +2030,10 @@ if (!port || !token) {
   console.error("OPENCHAMBER_SERVICE_PORT and OPENCHAMBER_SERVICE_TOKEN are required");
   process.exit(1);
 }
+var expectedAuthorization = Buffer.from(`Bearer ${token}`, "utf8");
 var browser = new ServerBrowser;
+var MAX_BODY = 1e6;
+var MAX_ACTION_BODY = 2000000;
 var queue = Promise.resolve();
 var serialized = (work) => {
   const next = queue.then(work, work);
@@ -2023,7 +2042,7 @@ var serialized = (work) => {
   });
   return next;
 };
-var readBody = (req, limit = 1e6) => new Promise((resolve, reject) => {
+var readBody = (req, limit = MAX_BODY) => new Promise((resolve, reject) => {
   const chunks = [];
   let size = 0;
   req.on("data", (chunk) => {
@@ -2052,7 +2071,7 @@ var parseJson = (text) => {
   }
 };
 var handleBrowserControl = async (req, res) => {
-  const request = readBrowserProviderRequest(await readBody(req, 2000000));
+  const request = readBrowserProviderRequest(await readBody(req, MAX_ACTION_BODY));
   if (!request) {
     sendJson(res, 400, { ok: false, error: "Not a browser action" });
     return;
@@ -2089,7 +2108,7 @@ var handleFrame = async (res, url) => {
   const headers = {
     "Content-Type": frame.mime,
     "Content-Length": frame.bytes.length,
-    [SURFACE_SEQ_HEADER]: String(browser.seq),
+    [SURFACE_SEQ_HEADER]: String(frame.seq),
     [SURFACE_WIDTH_HEADER]: String(frame.width),
     [SURFACE_HEIGHT_HEADER]: String(frame.height),
     [SURFACE_TITLE_HEADER]: title.replace(/[^\x20-\x7e\xa0-\xff]/g, "")
@@ -2210,6 +2229,8 @@ var normalizeAddress = (input) => {
   const value = input.trim();
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value) || /^(about|data|blob|view-source):/i.test(value))
     return value;
+  if (value.startsWith("["))
+    return `http://${value}`;
   const host = value.split("/")[0].split(":")[0];
   const local = host === "localhost" || host.endsWith(".localhost") || /^\d+\.\d+\.\d+\.\d+$/.test(host) || host.endsWith(".test");
   return `${local ? "http" : "https"}://${value}`;
@@ -2257,9 +2278,7 @@ var handleDock = async (req, res, url) => {
       }
       if (!tab)
         throw new Error("No tab is open.");
-      browser.navigate(tab, normalizeAddress(address), 30000).catch(() => {
-        return;
-      });
+      browser.navigate(tab, normalizeAddress(address), 30000).catch((error) => console.error("navigate failed:", error.message));
     } else if (url.pathname === "/tab") {
       const id = typeof body.id === "string" ? body.id : "";
       if (!browser.tabs.has(id))
@@ -2289,7 +2308,8 @@ var handleDock = async (req, res, url) => {
   return true;
 };
 var server = http.createServer((req, res) => {
-  if (req.headers.authorization !== `Bearer ${token}`) {
+  const given = Buffer.from(req.headers.authorization ?? "", "utf8");
+  if (given.length !== expectedAuthorization.length || !timingSafeEqual(given, expectedAuthorization)) {
     sendJson(res, 401, { ok: false, error: "unauthorized" });
     return;
   }
@@ -2315,6 +2335,10 @@ var server = http.createServer((req, res) => {
     else
       res.end();
   });
+});
+server.on("error", (error) => {
+  console.error("service failed:", error.message);
+  process.exit(1);
 });
 server.listen(port, "127.0.0.1");
 var stopping = false;

@@ -29,6 +29,10 @@ export const VIEWPORTS: Record<Exclude<BrowserViewportMode, 'fill'>, { width: nu
 
 const FILL_FALLBACK = { width: 1280, height: 800 };
 const CONSOLE_KEEP = 30;
+/** Grace after an action before it is decided whether it started a navigation. */
+const SETTLE_MS = 200;
+/** Grace after a load stops while late paints and title updates land. */
+const POST_LOAD_MS = 250;
 /** Frames nobody asks for still cost base64 decoding and JPEG parsing on the
  * service's single thread; the screencast stops after this long without a viewer. */
 const SCREENCAST_IDLE_MS = 5_000;
@@ -56,7 +60,8 @@ export type Tab = {
   loading: boolean;
   /** Bumped on every main-frame load start, so an action can tell it caused one. */
   loadSeq: number;
-  stopWaiters: Array<() => void>;
+  /** Waked with `true` when the main frame stops loading, `false` when the tab is gone. */
+  stopWaiters: Array<(stopped: boolean) => void>;
   console: BrowserConsoleProblem[];
   lastUsed: number;
   /** Settles once the tab is set up and running. */
@@ -71,6 +76,8 @@ type Frame = {
   /** Viewport CSS pixels the picture covers, to map input back onto the page. */
   cssWidth: number;
   cssHeight: number;
+  /** The `seq` this picture is current for; `touch()` keeps it in step with `this.seq`. */
+  seq: number;
 };
 
 export type Controller = 'none' | 'agent' | 'user';
@@ -321,7 +328,7 @@ export class ServerBrowser {
       case 'Page.frameStoppedLoading':
         if (!tab.mainFrameId || params.frameId === tab.mainFrameId) {
           tab.loading = false;
-          for (const wake of tab.stopWaiters.splice(0)) wake();
+          for (const wake of tab.stopWaiters.splice(0)) wake(true);
         }
         break;
       case 'Page.frameNavigated':
@@ -345,6 +352,7 @@ export class ServerBrowser {
             bytes,
             mime: 'image/jpeg',
             ...size,
+            seq: 0,
             cssWidth: params.metadata?.deviceWidth ?? tab.width,
             cssHeight: params.metadata?.deviceHeight ?? tab.height,
           });
@@ -461,7 +469,7 @@ export class ServerBrowser {
     this.tabs.delete(tab.id);
     this.byTarget.delete(tab.targetId);
     this.bySession.delete(tab.sessionId);
-    for (const wake of tab.stopWaiters.splice(0)) wake();
+    for (const wake of tab.stopWaiters.splice(0)) wake(false);
     if (this.shownTabId === tab.id) {
       this.shownTabId = null;
       const next = [...this.tabs.values()].sort((a, b) => b.lastUsed - a.lastUsed)[0];
@@ -512,15 +520,19 @@ export class ServerBrowser {
     await this.trimTabs();
     this.creating += 1;
     let tab: Tab;
+    let targetId = '';
     try {
-      const { targetId } = await this.send('Target.createTarget', { url: 'about:blank', background: true });
+      targetId = (await this.send('Target.createTarget', { url: 'about:blank', background: true })).targetId;
       // The attach event can arrive before or after createTarget answers.
       tab = this.byTarget.get(targetId) ?? await Promise.race([
         new Promise<Tab>((resolve) => { this.attachWaiters.set(targetId, resolve); }),
         sleep(10_000).then((): never => { throw new Error('The new tab did not start.'); }),
       ]);
-      this.attachWaiters.delete(targetId);
     } finally {
+      // Both reset however the race ends: a waiter left behind would resolve a
+      // later attach to the same target that nobody awaits, and a `creating`
+      // count stuck above zero stops attributing popups to the tab on screen.
+      if (targetId) this.attachWaiters.delete(targetId);
       this.creating -= 1;
     }
     await tab.ready;
@@ -562,14 +574,15 @@ export class ServerBrowser {
 
   // ---- Navigation ----
 
-  /** Resolves `true` once the main frame stops loading, `false` on timeout. */
+  /** Resolves `true` once the main frame stops loading, `false` on timeout or
+   * when the tab is gone while waiting. */
   waitForStop(tab: Tab, timeoutMs: number): Promise<boolean> {
     if (!tab.loading) return Promise.resolve(true);
     return new Promise((resolve) => {
       const timer = setTimeout(() => resolve(false), timeoutMs);
-      tab.stopWaiters.push(() => {
+      tab.stopWaiters.push((stopped) => {
         clearTimeout(timer);
-        resolve(true);
+        resolve(stopped);
       });
     });
   }
@@ -588,7 +601,7 @@ export class ServerBrowser {
     if (!result.loaderId) return { settled: true };
     tab.loading = true;
     const settled = await this.waitForStop(tab, timeoutMs);
-    if (settled) await sleep(250);
+    if (settled) await sleep(POST_LOAD_MS);
     return { settled };
   }
 
@@ -600,9 +613,9 @@ export class ServerBrowser {
   async withNavigation<T>(tab: Tab, action: () => Promise<T>, timeoutMs = 10_000): Promise<T> {
     const before = tab.loadSeq;
     const result = await action();
-    await sleep(200);
+    await sleep(SETTLE_MS);
     if (tab.loadSeq !== before || tab.loading) {
-      if (await this.waitForStop(tab, timeoutMs)) await sleep(200);
+      if (await this.waitForStop(tab, timeoutMs)) await sleep(SETTLE_MS);
     }
     return result;
   }
@@ -714,7 +727,7 @@ export class ServerBrowser {
       const bytes = await this.screenshot(tab, 'jpeg');
       const size = imageSize(bytes) ?? { width: tab.width, height: tab.height };
       if (tab.id === this.shownTabId) {
-        this.setFrame({ bytes, mime: 'image/jpeg', ...size, cssWidth: tab.width, cssHeight: tab.height });
+        this.setFrame({ bytes, mime: 'image/jpeg', ...size, seq: 0, cssWidth: tab.width, cssHeight: tab.height });
       }
     } catch {
       // page still starting; the screencast will deliver
@@ -755,6 +768,9 @@ export class ServerBrowser {
 
   touch(): void {
     this.seq += 1;
+    // The frame's seq is written here and nowhere else, so a reader holding the
+    // frame always sees the seq it was current for.
+    if (this.frame) this.frame.seq = this.seq;
     for (const wake of this.frameWaiters.splice(0)) wake();
   }
 

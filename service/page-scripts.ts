@@ -31,6 +31,9 @@ const MAX_TEXT_CHARS = 6_000;
 const MAX_ELEMENTS = 120;
 /** Enough to recognise a control; full labels are what made entries expensive. */
 const MAX_LABEL_CHARS = 80;
+/** Elements walked before the scan gives up, so a pathological document cannot
+ * hold the service thread while `querySelectorAll` is iterated. */
+const SCAN_CAP = 2_000;
 /** Longest a scroll waits for paint frames before it reports anyway. */
 const SCROLL_SETTLE_MAX_MS = 100;
 
@@ -176,7 +179,10 @@ export const buildSnapshotScript = ({ selector }: { selector?: string } = {}): s
   var interactive = root.querySelectorAll('a[href], button, input, select, textarea, [role="button"], [role="link"], [role="tab"], [contenteditable="true"]');
   var elements = [];
   var visibleTotal = 0;
+  var scanCapped = false;
   for (var i = 0; i < interactive.length; i += 1) {
+    // Stop walking instead of measuring forever: what was scanned is reported.
+    if (i >= ${SCAN_CAP}) { scanCapped = true; break; }
     var element = interactive[i];
     if (!visible(element)) continue;
     visibleTotal += 1;
@@ -231,6 +237,7 @@ export const buildSnapshotScript = ({ selector }: { selector?: string } = {}): s
     result.elementsTruncated = true;
     result.interactiveElementsOnPage = visibleTotal;
   }
+  if (scanCapped) result.scanCapped = true;
   return result;
 `);
 

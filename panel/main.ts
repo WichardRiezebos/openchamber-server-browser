@@ -140,12 +140,19 @@ host.onReady((context) => {
     viewport.value = state.viewport;
   };
 
+  // The poll fires every second and after every dock action; when the service
+  // answers slowly the requests would stack up, so only one runs at a time.
+  let refreshing = false;
   const refresh = async (): Promise<void> => {
+    if (refreshing) return;
+    refreshing = true;
     try {
       const result = await host.serviceRequest({ method: 'GET', path: '/state' });
       if (result.status === 200) render(JSON.parse(result.body) as State);
     } catch {
       // service not started yet
+    } finally {
+      refreshing = false;
     }
   };
   void refresh();
