@@ -2047,20 +2047,40 @@ var handleFrame = async (res, url) => {
   res.writeHead(200, headers);
   res.end(frame.bytes);
 };
+var coalesceHoverMoves = (events) => {
+  const kept = [];
+  for (const event of events) {
+    const previous = kept[kept.length - 1];
+    const bothHoverMoves = event.type === "pointer" && event.action === "move" && event.buttons === 0 && previous?.type === "pointer" && previous.action === "move" && previous.buttons === 0;
+    if (bothHoverMoves)
+      kept[kept.length - 1] = event;
+    else
+      kept.push(event);
+  }
+  return kept;
+};
 var applyInput = async (events) => {
   const tab = browser.shownTab;
   if (!tab)
     return;
-  for (const event of events) {
+  for (const event of coalesceHoverMoves(events)) {
     if (event.type === "pointer") {
-      await browser.userPointer(tab, event.action, event.x, event.y, event.button, event.buttons, modifierBits(event.modifiers));
+      browser.userPointer(tab, event.action, event.x, event.y, event.button, event.buttons, modifierBits(event.modifiers)).catch(() => {
+        return;
+      });
     } else if (event.type === "wheel") {
-      await browser.userWheel(tab, event.x, event.y, event.deltaX, event.deltaY, modifierBits(event.modifiers));
+      await browser.userWheel(tab, event.x, event.y, event.deltaX, event.deltaY, modifierBits(event.modifiers)).catch(() => {
+        return;
+      });
     } else if (event.type === "key") {
       const modifiers = shouldMapMetaToCtrl(event) ? { ...event.modifiers, meta: false, ctrl: true } : event.modifiers;
-      await browser.dispatchKey(tab, keyEventParams({ ...event, modifiers }));
+      await browser.dispatchKey(tab, keyEventParams({ ...event, modifiers })).catch(() => {
+        return;
+      });
     } else if (event.type === "text") {
-      await browser.insertText(tab, event.text);
+      await browser.insertText(tab, event.text).catch(() => {
+        return;
+      });
     }
   }
 };
@@ -2082,9 +2102,7 @@ var handleSurface = async (req, res, url) => {
       res.end();
       return true;
     }
-    await applyInput(batch.events).catch(() => {
-      return;
-    });
+    await applyInput(batch.events);
     res.writeHead(204);
     res.end();
     return true;

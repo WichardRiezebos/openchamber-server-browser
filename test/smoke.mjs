@@ -216,6 +216,14 @@ try {
   check('pointer, Cmd+A, paste and keys reach the page', typedByUser.ok && typedByUser.data.title === 'typed:handmatig!', typedByUser.data?.title);
   const stale = await call('POST', '/surface/input', { events: [] }, { 'x-surface-frame-seq': '1' });
   check('input on a picture of another tab is refused', stale.status === 409, stale.status);
+  // Hover moves stream in while someone steers towards a button; the service
+  // must not wait for each move to be applied, or the click that ends the
+  // gesture lands seconds late.
+  const movesStart = Date.now();
+  const moves = await call('POST', '/surface/input', { events: Array.from({ length: 60 }, (_, i) => ({
+    type: 'pointer', action: 'move', x: 100 + ((i * 13) % 1000), y: 300 + ((i * 7) % 200), button: 0, buttons: 0, modifiers: mods,
+  })) }, { 'x-surface-viewer': 'v1', 'x-surface-frame-seq': frameSeq });
+  check('a batch of 60 hover moves answers fast', moves.status === 204 && Date.now() - movesStart < 100, { status: moves.status, ms: Date.now() - movesStart });
   // Select the field's text and copy it out.
   await call('POST', '/surface/input', { events: [
     { type: 'key', action: 'down', key: 'a', code: 'KeyA', modifiers: { ...mods, ctrl: true } },

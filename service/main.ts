@@ -135,19 +135,41 @@ const handleFrame = async (res: http.ServerResponse, url: URL): Promise<void> =>
   res.end(frame.bytes);
 };
 
+/** Collapses runs of hover moves to their last one; a drag (buttons held)
+ * keeps every point for drawing. */
+const coalesceHoverMoves = (events: SurfaceInputEvent[]): SurfaceInputEvent[] => {
+  const kept: SurfaceInputEvent[] = [];
+  for (const event of events) {
+    const previous = kept[kept.length - 1];
+    const bothHoverMoves = event.type === 'pointer' && event.action === 'move' && event.buttons === 0
+      && previous?.type === 'pointer' && previous.action === 'move' && previous.buttons === 0;
+    if (bothHoverMoves) kept[kept.length - 1] = event;
+    else kept.push(event);
+  }
+  return kept;
+};
+
+/** Applies the events to the page. Pointer moves are the exception: they
+ * stream in at frame rate while someone steers, and waiting for each answer
+ * cost a frame (~16 ms) per move, so the click that ended the gesture landed
+ * seconds late. Moves are therefore written without waiting — CDP commands on
+ * one session run in order, and pages see mousemove aligned to frames anyway,
+ * so dropping the in-between hover positions changes nothing. Everything else
+ * is applied before this returns, so a batch is done when the request answers
+ * (the host reads /surface/clipboard right behind a copy chord). */
 const applyInput = async (events: SurfaceInputEvent[]): Promise<void> => {
   const tab = browser.shownTab;
   if (!tab) return;
-  for (const event of events) {
+  for (const event of coalesceHoverMoves(events)) {
     if (event.type === 'pointer') {
-      await browser.userPointer(tab, event.action, event.x, event.y, event.button, event.buttons, modifierBits(event.modifiers));
+      void browser.userPointer(tab, event.action, event.x, event.y, event.button, event.buttons, modifierBits(event.modifiers)).catch(() => undefined);
     } else if (event.type === 'wheel') {
-      await browser.userWheel(tab, event.x, event.y, event.deltaX, event.deltaY, modifierBits(event.modifiers));
+      await browser.userWheel(tab, event.x, event.y, event.deltaX, event.deltaY, modifierBits(event.modifiers)).catch(() => undefined);
     } else if (event.type === 'key') {
       const modifiers = shouldMapMetaToCtrl(event) ? { ...event.modifiers, meta: false, ctrl: true } : event.modifiers;
-      await browser.dispatchKey(tab, keyEventParams({ ...event, modifiers }));
+      await browser.dispatchKey(tab, keyEventParams({ ...event, modifiers })).catch(() => undefined);
     } else if (event.type === 'text') {
-      await browser.insertText(tab, event.text);
+      await browser.insertText(tab, event.text).catch(() => undefined);
     }
   }
 };
@@ -171,7 +193,7 @@ const handleSurface = async (req: http.IncomingMessage, res: http.ServerResponse
       res.end();
       return true;
     }
-    await applyInput(batch.events).catch(() => undefined);
+    await applyInput(batch.events);
     res.writeHead(204);
     res.end();
     return true;
