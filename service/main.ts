@@ -103,6 +103,7 @@ const handleBrowserControl = async (req: http.IncomingMessage, res: http.ServerR
 // ---- Shared surface ----
 
 const handleFrame = async (res: http.ServerResponse, url: URL): Promise<void> => {
+  browser.markFrameWanted();
   const after = Number(url.searchParams.get('after') ?? '0') || 0;
   const wait = Math.min(Math.max(Number(url.searchParams.get('wait') ?? '0') || 0, 0), 25_000);
   if (!browser.running) {
@@ -271,6 +272,7 @@ const handleDock = async (req: http.IncomingMessage, res: http.ServerResponse, u
       tabs: browser.listTabs(),
       controller: browser.controller,
       agentActive: Date.now() < browser.agentActiveUntil,
+      streaming: browser.streaming,
     });
     return true;
   }

@@ -205,6 +205,12 @@ try {
   const after = await call('GET', '/surface/frame?after=0&wait=1000');
   const afterBytes = Buffer.from(await after.arrayBuffer());
   check('the live picture updates when the page repaints', after.status === 200 && !afterBytes.equals(before), { status: after.status, same: afterBytes.equals(before) });
+  await new Promise((resolve) => setTimeout(resolve, 6000));
+  const idleState = await (await call('GET', '/state')).json();
+  check('the screencast stops when nobody watches', idleState.streaming === false, idleState.streaming);
+  const watchAgain = await call('GET', '/surface/frame?after=0&wait=1000');
+  const watchingState = await (await call('GET', '/state')).json();
+  check('the screencast resumes for the next viewer', watchAgain.status === 200 && watchingState.streaming === true, watchingState.streaming);
   await act('browser.close', { tabId: live.data?.tabId });
 
   // The person takes over: show the login tab, click the field, paste text.

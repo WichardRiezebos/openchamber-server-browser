@@ -29,6 +29,9 @@ export const VIEWPORTS: Record<Exclude<BrowserViewportMode, 'fill'>, { width: nu
 
 const FILL_FALLBACK = { width: 1280, height: 800 };
 const CONSOLE_KEEP = 30;
+/** Frames nobody asks for still cost base64 decoding and JPEG parsing on the
+ * service's single thread; the screencast stops after this long without a viewer. */
+const SCREENCAST_IDLE_MS = 5_000;
 const START_PAGE = `data:text/html;charset=utf-8,${encodeURIComponent(`<!doctype html><html><head><title>Server Browser</title>
 <meta name="color-scheme" content="light dark"><style>
 body{font:15px/1.5 system-ui,sans-serif;display:grid;place-items:center;height:100vh;margin:0;color:#555;background:#f6f6f4}
@@ -128,6 +131,10 @@ export class ServerBrowser {
   private agentActiveTimer: NodeJS.Timeout | null = null;
   panelSize: { width: number; height: number } | null = null;
   private lastDown = { at: 0, x: 0, y: 0, button: -1, count: 0 };
+  /** True from the moment a screencast starts until the idle timer stops it. */
+  private screencastActive = false;
+  private frameWantedAt = 0;
+  private idleTimer: NodeJS.Timeout | null = null;
 
   // ---- Lifecycle ----
 
@@ -252,6 +259,9 @@ export class ServerBrowser {
     this.bySession.clear();
     this.shownTabId = null;
     this.frame = null;
+    this.screencastActive = false;
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = null;
     this.touch();
   }
 
@@ -694,6 +704,9 @@ export class ServerBrowser {
   }
 
   private async startScreencast(tab: Tab): Promise<void> {
+    // Streaming counts from the decision to start, not from Chrome's answer: a
+    // viewer asking /state right after a frame request must already see it true.
+    this.screencastActive = true;
     await this.send('Page.stopScreencast', {}, tab.sessionId).catch(() => undefined);
     // A first picture right away: the screencast only sends a frame when something repaints.
     this.tabFirstSeq = this.seq + 1;
@@ -767,6 +780,29 @@ export class ServerBrowser {
     if (!wasActive) this.touch();
     if (this.agentActiveTimer) clearTimeout(this.agentActiveTimer);
     this.agentActiveTimer = setTimeout(() => this.touch(), 3_050);
+  }
+
+  /** A viewer asked for the live picture: stream again, and stop again after
+   * SCREENCAST_IDLE_MS without such a request — the screencast only pays off
+   * when someone is watching, and idle it costs the service thread its frames. */
+  markFrameWanted(): void {
+    this.frameWantedAt = Date.now();
+    const tab = this.shownTab;
+    if (!this.screencastActive && tab) void this.startScreencast(tab);
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = null;
+      // Only stop when the idle window truly elapsed: the wall clock can jump.
+      if (Date.now() - this.frameWantedAt < SCREENCAST_IDLE_MS) return;
+      this.screencastActive = false;
+      const shown = this.shownTab;
+      if (shown) void this.send('Page.stopScreencast', {}, shown.sessionId).catch(() => undefined);
+    }, SCREENCAST_IDLE_MS);
+    this.idleTimer.unref();
+  }
+
+  get streaming(): boolean {
+    return this.screencastActive;
   }
 
   get shownTab(): Tab | undefined {

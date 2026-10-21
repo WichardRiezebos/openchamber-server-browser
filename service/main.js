@@ -1150,6 +1150,7 @@ var VIEWPORTS = {
 };
 var FILL_FALLBACK = { width: 1280, height: 800 };
 var CONSOLE_KEEP = 30;
+var SCREENCAST_IDLE_MS = 5000;
 var START_PAGE = `data:text/html;charset=utf-8,${encodeURIComponent(`<!doctype html><html><head><title>Server Browser</title>
 <meta name="color-scheme" content="light dark"><style>
 body{font:15px/1.5 system-ui,sans-serif;display:grid;place-items:center;height:100vh;margin:0;color:#555;background:#f6f6f4}
@@ -1204,6 +1205,9 @@ class ServerBrowser {
   agentActiveTimer = null;
   panelSize = null;
   lastDown = { at: 0, x: 0, y: 0, button: -1, count: 0 };
+  screencastActive = false;
+  frameWantedAt = 0;
+  idleTimer = null;
   get running() {
     return Boolean(this.conn && !this.conn.isClosed);
   }
@@ -1329,6 +1333,10 @@ class ServerBrowser {
     this.bySession.clear();
     this.shownTabId = null;
     this.frame = null;
+    this.screencastActive = false;
+    if (this.idleTimer)
+      clearTimeout(this.idleTimer);
+    this.idleTimer = null;
     this.touch();
   }
   kill() {
@@ -1752,6 +1760,7 @@ class ServerBrowser {
     this.startScreencast(tab);
   }
   async startScreencast(tab) {
+    this.screencastActive = true;
     await this.send("Page.stopScreencast", {}, tab.sessionId).catch(() => {
       return;
     });
@@ -1828,6 +1837,29 @@ class ServerBrowser {
     if (this.agentActiveTimer)
       clearTimeout(this.agentActiveTimer);
     this.agentActiveTimer = setTimeout(() => this.touch(), 3050);
+  }
+  markFrameWanted() {
+    this.frameWantedAt = Date.now();
+    const tab = this.shownTab;
+    if (!this.screencastActive && tab)
+      this.startScreencast(tab);
+    if (this.idleTimer)
+      clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = null;
+      if (Date.now() - this.frameWantedAt < SCREENCAST_IDLE_MS)
+        return;
+      this.screencastActive = false;
+      const shown = this.shownTab;
+      if (shown)
+        this.send("Page.stopScreencast", {}, shown.sessionId).catch(() => {
+          return;
+        });
+    }, SCREENCAST_IDLE_MS);
+    this.idleTimer.unref();
+  }
+  get streaming() {
+    return this.screencastActive;
   }
   get shownTab() {
     return this.shownTabId ? this.tabs.get(this.shownTabId) : undefined;
@@ -2034,6 +2066,7 @@ var handleBrowserControl = async (req, res) => {
   sendJson(res, 200, result);
 };
 var handleFrame = async (res, url) => {
+  browser.markFrameWanted();
   const after = Number(url.searchParams.get("after") ?? "0") || 0;
   const wait = Math.min(Math.max(Number(url.searchParams.get("wait") ?? "0") || 0, 0), 25000);
   if (!browser.running) {
@@ -2193,7 +2226,8 @@ var handleDock = async (req, res, url) => {
       viewport: shown ? shown.viewportMode : browser.config.defaultViewport,
       tabs: browser.listTabs(),
       controller: browser.controller,
-      agentActive: Date.now() < browser.agentActiveUntil
+      agentActive: Date.now() < browser.agentActiveUntil,
+      streaming: browser.streaming
     });
     return true;
   }
