@@ -46,9 +46,7 @@ const app = http.createServer((req, res) => {
   } else if (url.pathname === '/dashboard') {
     res.end(page('Dashboard', `<h1>Welkom ${url.searchParams.get('relatie') ?? ''}</h1><button id="danger" onclick="document.body.dataset.ok = confirm('Zeker?')">Verwijder</button>`));
   } else if (url.pathname === '/about') {
-    res.end(page('Over', '<h1>Over ons</h1><p style="color: rgb(200, 0, 0); font-size: 40px" id="red">Rood</p><button id="kleur" onclick="red.textContent = \'Groen\'; red.style.color = \'green\'">Kleur</button>'));
-  } else if (url.pathname === '/closer') {
-    res.end(page('Sluiten', '<button id="bye" onclick="window.close()">Sluit</button>'));
+    res.end(page('Over', '<h1>Over ons</h1><p style="color: rgb(200, 0, 0); font-size: 40px" id="red">Rood</p><button id="kleur" onclick="red.textContent = \'Groen\'; red.style.color = \'green\'">Kleur</button><button id="bye" onclick="window.close()">Sluit</button>'));
   } else {
     res.statusCode = 404;
     res.end(page('404', 'not found'));
@@ -63,6 +61,9 @@ const home = mkdtempSync(path.join(os.tmpdir(), 'osb-home-'));
 mkdirSync(path.join(home, '.config', 'openchamber-server-browser'), { recursive: true });
 writeFileSync(path.join(home, '.config', 'openchamber-server-browser', 'config.json'), JSON.stringify({
   ...(chromePath ? { chromePath } : {}),
+  // A bounded tab count, like a long session: trimTabs may close the start
+  // page, which is what makes the last-tab self-close below reachable.
+  maxTabs: 2,
   extraArgs,
 }));
 const servicePort = 20000 + Math.floor(Math.random() * 20000);
@@ -102,7 +103,7 @@ try {
   const open = await act('browser.open', { url: `${base}/` });
   check('open loads a *.localhost dev URL', open.ok && open.data.title === 'Inloggen' && open.data.settled === true, open);
   check('open answers a tabId and viewport', open.ok && typeof open.data.tabId === 'string' && open.data.viewport?.mode === 'desktop', open);
-  const tabId = open.data?.tabId;
+  let tabId = open.data?.tabId;
 
   const snap = await act('browser.snapshot', { tabId });
   check('snapshot lists the form fields', snap.ok && snap.data.elements.some((el) => el.selector === '#relatie'), snap);
@@ -163,21 +164,27 @@ try {
   const popup = await act('browser.click', { tabId, selector: '#popup' });
   await new Promise((resolve) => setTimeout(resolve, 800));
   const tabsNow = await act('browser.snapshot', {});
-  check('target=_blank opens a tab that is followed on screen', popup.ok && tabsNow.ok && tabsNow.data.title === 'Over' && tabsNow.data.tabs.length >= 3, tabsNow.data?.tabs);
+  check('target=_blank opens a tab that is followed on screen', popup.ok && tabsNow.ok && tabsNow.data.title === 'Over' && tabsNow.data.tabs.length >= 2, tabsNow.data?.tabs);
+  const popupTabId = tabsNow.data?.tabs?.find((tab) => tab.active)?.id;
+  check('the popup is on screen', typeof popupTabId === 'string', tabsNow.data?.tabs);
+  await act('browser.close', { tabId });
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  const popupClose = await act('browser.click', { tabId: popupTabId, selector: '#bye' });
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  const afterPopupClose = await (await call('GET', '/state')).json();
+  check('closing the last page keeps the browser alive', afterPopupClose.running === true && afterPopupClose.tabs.length >= 1, afterPopupClose);
+  const frameAfterClose = await call('GET', '/surface/frame?after=0&wait=1000');
+  check('the live picture recovers after the last page closes itself', frameAfterClose.status === 200, frameAfterClose.status);
+  // The popup was the last page; reopen the login page for the surface
+  // section below, which drives it by tabId.
+  const reopenAfterClose = await act('browser.open', { url: `${base}/` });
+  check('opening a page still works after self-close', reopenAfterClose.ok, reopenAfterClose);
+  tabId = reopenAfterClose.data?.tabId;
   const second = await act('browser.open', { url: `${base}/about` }, 'ses_other');
   const closeOther = await act('browser.close', { tabId: second.data?.tabId }, 'ses_test');
   check('a chat cannot close another chat\'s tab', !closeOther.ok, closeOther);
   const closeOwn = await act('browser.close', {}, 'ses_other');
   check('a chat closes its own most recent tab', closeOwn.ok && closeOwn.data.tabId === second.data?.tabId, closeOwn);
-  const closer = await act('browser.open', { url: `${base}/closer` });
-  const closeClick = await act('browser.click', { tabId: closer.data?.tabId, selector: '#bye' });
-  await new Promise((resolve) => setTimeout(resolve, 800));
-  const afterClose = await (await call('GET', '/state')).json();
-  check('closing the last page keeps the browser alive', afterClose.running === true && afterClose.tabs.length >= 1, afterClose);
-  const frameAfterClose = await call('GET', '/surface/frame?after=0&wait=1000');
-  check('the live picture recovers after the last page closes itself', frameAfterClose.status === 200, frameAfterClose.status);
-  const reopenAfterClose = await act('browser.open', { url: `${base}/about` });
-  check('opening a page still works after self-close', reopenAfterClose.ok, reopenAfterClose);
 
   console.log('surface');
   const frame = await call('GET', '/surface/frame?after=0&wait=1000');
