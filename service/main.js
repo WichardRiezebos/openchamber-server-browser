@@ -965,7 +965,7 @@ class CdpConnection extends EventEmitter {
   get isClosed() {
     return this.closed;
   }
-  send(method, params = {}, sessionId) {
+  send(method, params = {}, sessionId, timeoutMs = 30000) {
     if (this.closed)
       return Promise.reject(new CdpError(method, "browser connection is closed"));
     const id = this.nextId;
@@ -974,7 +974,21 @@ class CdpConnection extends EventEmitter {
     if (sessionId)
       message.sessionId = sessionId;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject, method });
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new CdpError(method, `timed out after ${timeoutMs} ms`));
+      }, timeoutMs);
+      this.pending.set(id, {
+        resolve: (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+        method
+      });
       this.out.write(`${JSON.stringify(message)}\x00`);
     });
   }

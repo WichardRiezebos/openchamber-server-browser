@@ -35,7 +35,7 @@
   "scripts": {
     "build": "bun scripts/build.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node test/smoke.mjs"
+    "test": "bun test/unit-cdp.ts && node test/smoke.mjs"
   },
   "devDependencies": {
     "@openchamber/sdk": "^2.5.0",
