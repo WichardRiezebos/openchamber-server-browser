@@ -262,6 +262,11 @@ try {
   await new Promise((resolve) => setTimeout(resolve, 800));
   const afterDock = await (await call('GET', '/state')).json();
   check('the address bar accepts a bare *.localhost address', dockNav.ok && afterDock.url.endsWith('/about'), afterDock.url);
+
+  const restart = await call('POST', '/restart', {});
+  check('restart answers ok', restart.status === 200 && (await restart.json()).ok === true, restart.status);
+  const reopenedAfterRestart = await act('browser.open', { url: `${base}/` });
+  check('the browser works after a restart', reopenedAfterRestart.ok && reopenedAfterRestart.data.title === 'Inloggen', reopenedAfterRestart);
 } catch (error) {
   failures += 1;
   console.log(`  FAIL unexpected error — ${error.stack}`);

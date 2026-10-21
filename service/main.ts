@@ -282,8 +282,10 @@ const handleDock = async (req: http.IncomingMessage, res: http.ServerResponse, u
   const body = parseJson(await readBody(req)) ?? {};
   try {
     if (url.pathname === '/restart') {
-      browser.kill();
-      await browser.ensure();
+      await serialized(async () => {
+        await browser.close();
+        await browser.ensure();
+      });
       sendJson(res, 200, { ok: true });
       return true;
     }
