@@ -461,6 +461,11 @@ export class ServerBrowser {
         this.touch();
       }
     }
+    if (this.tabs.size === 0 && this.conn && !this.conn.isClosed) {
+      // The last page closed itself (window.close) or was destroyed; keep this
+      // browser and show the start page rather than relaunching it.
+      void this.createTab(START_PAGE, null).catch(() => undefined);
+    }
   }
 
   // ---- Tabs ----

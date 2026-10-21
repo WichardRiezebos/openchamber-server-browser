@@ -47,6 +47,8 @@ const app = http.createServer((req, res) => {
     res.end(page('Dashboard', `<h1>Welkom ${url.searchParams.get('relatie') ?? ''}</h1><button id="danger" onclick="document.body.dataset.ok = confirm('Zeker?')">Verwijder</button>`));
   } else if (url.pathname === '/about') {
     res.end(page('Over', '<h1>Over ons</h1><p style="color: rgb(200, 0, 0); font-size: 40px" id="red">Rood</p><button id="kleur" onclick="red.textContent = \'Groen\'; red.style.color = \'green\'">Kleur</button>'));
+  } else if (url.pathname === '/closer') {
+    res.end(page('Sluiten', '<button id="bye" onclick="window.close()">Sluit</button>'));
   } else {
     res.statusCode = 404;
     res.end(page('404', 'not found'));
@@ -167,6 +169,15 @@ try {
   check('a chat cannot close another chat\'s tab', !closeOther.ok, closeOther);
   const closeOwn = await act('browser.close', {}, 'ses_other');
   check('a chat closes its own most recent tab', closeOwn.ok && closeOwn.data.tabId === second.data?.tabId, closeOwn);
+  const closer = await act('browser.open', { url: `${base}/closer` });
+  const closeClick = await act('browser.click', { tabId: closer.data?.tabId, selector: '#bye' });
+  await new Promise((resolve) => setTimeout(resolve, 800));
+  const afterClose = await (await call('GET', '/state')).json();
+  check('closing the last page keeps the browser alive', afterClose.running === true && afterClose.tabs.length >= 1, afterClose);
+  const frameAfterClose = await call('GET', '/surface/frame?after=0&wait=1000');
+  check('the live picture recovers after the last page closes itself', frameAfterClose.status === 200, frameAfterClose.status);
+  const reopenAfterClose = await act('browser.open', { url: `${base}/about` });
+  check('opening a page still works after self-close', reopenAfterClose.ok, reopenAfterClose);
 
   console.log('surface');
   const frame = await call('GET', '/surface/frame?after=0&wait=1000');

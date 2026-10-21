@@ -1543,6 +1543,11 @@ class ServerBrowser {
         this.touch();
       }
     }
+    if (this.tabs.size === 0 && this.conn && !this.conn.isClosed) {
+      this.createTab(START_PAGE, null).catch(() => {
+        return;
+      });
+    }
   }
   sizeFor(mode) {
     if (mode === "fill")
