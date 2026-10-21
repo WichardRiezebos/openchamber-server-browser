@@ -2064,8 +2064,12 @@ var applyInput = async (events) => {
   if (!tab)
     return;
   for (const event of coalesceHoverMoves(events)) {
-    if (event.type === "pointer") {
+    if (event.type === "pointer" && event.action === "move") {
       browser.userPointer(tab, event.action, event.x, event.y, event.button, event.buttons, modifierBits(event.modifiers)).catch(() => {
+        return;
+      });
+    } else if (event.type === "pointer") {
+      await browser.userPointer(tab, event.action, event.x, event.y, event.button, event.buttons, modifierBits(event.modifiers)).catch(() => {
         return;
       });
     } else if (event.type === "wheel") {

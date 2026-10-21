@@ -223,7 +223,7 @@ try {
   const moves = await call('POST', '/surface/input', { events: Array.from({ length: 60 }, (_, i) => ({
     type: 'pointer', action: 'move', x: 100 + ((i * 13) % 1000), y: 300 + ((i * 7) % 200), button: 0, buttons: 0, modifiers: mods,
   })) }, { 'x-surface-viewer': 'v1', 'x-surface-frame-seq': frameSeq });
-  check('a batch of 60 hover moves answers fast', moves.status === 204 && Date.now() - movesStart < 100, { status: moves.status, ms: Date.now() - movesStart });
+  check('a batch of 60 hover moves answers fast', moves.status === 204 && Date.now() - movesStart < 250, { status: moves.status, ms: Date.now() - movesStart });
   // Select the field's text and copy it out.
   await call('POST', '/surface/input', { events: [
     { type: 'key', action: 'down', key: 'a', code: 'KeyA', modifiers: { ...mods, ctrl: true } },

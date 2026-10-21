@@ -161,8 +161,10 @@ const applyInput = async (events: SurfaceInputEvent[]): Promise<void> => {
   const tab = browser.shownTab;
   if (!tab) return;
   for (const event of coalesceHoverMoves(events)) {
-    if (event.type === 'pointer') {
+    if (event.type === 'pointer' && event.action === 'move') {
       void browser.userPointer(tab, event.action, event.x, event.y, event.button, event.buttons, modifierBits(event.modifiers)).catch(() => undefined);
+    } else if (event.type === 'pointer') {
+      await browser.userPointer(tab, event.action, event.x, event.y, event.button, event.buttons, modifierBits(event.modifiers)).catch(() => undefined);
     } else if (event.type === 'wheel') {
       await browser.userWheel(tab, event.x, event.y, event.deltaX, event.deltaY, modifierBits(event.modifiers)).catch(() => undefined);
     } else if (event.type === 'key') {
