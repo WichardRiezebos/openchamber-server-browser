@@ -1804,6 +1804,8 @@ class ServerBrowser {
       this.restartTimer = null;
       if (tab.id !== this.shownTabId || !this.tabs.has(tab.id))
         return;
+      if (!this.screencastActive)
+        return;
       (async () => {
         await this.send("Page.stopScreencast", {}, tab.sessionId).catch(() => {
           return;

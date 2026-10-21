@@ -21,4 +21,25 @@ import { CdpConnection } from '../service/cdp.ts';
   assert.deepEqual(await pending, { protocolVersion: 'x' });
   console.log('ok   cdp send resolves on answer');
 }
+
+// A late answer for a timed-out id is dropped: no crash, no unhandled
+// rejection, and the connection keeps serving the next command.
+{
+  const out = new PassThrough();
+  const input = new PassThrough();
+  const conn = new CdpConnection(out, input);
+  await assert.rejects(conn.send('Runtime.evaluate', {}, undefined, 20), /timed out after 20 ms/);
+  const raw = await new Promise<string>((resolve) => out.once('data', (c: Buffer) => resolve(c.toString('utf8'))));
+  const late = JSON.parse(raw.replace(/\0$/, ''));
+  input.write(Buffer.from(JSON.stringify({ id: late.id, result: { tooLate: true } }) + '\0'));
+  const answered = conn.send('Browser.getVersion', {}, undefined, 500);
+  const echo = await new Promise<string>((resolve) => {
+    const onData = (c: Buffer): void => { out.removeListener('data', onData); resolve(c.toString('utf8')); };
+    out.on('data', onData);
+  });
+  const next = JSON.parse(echo.replace(/\0$/, ''));
+  input.write(Buffer.from(JSON.stringify({ id: next.id, result: { protocolVersion: 'y' } }) + '\0'));
+  assert.deepEqual(await answered, { protocolVersion: 'y' });
+  console.log('ok   late answer after timeout is inert');
+}
 console.log('unit: all checks passed');

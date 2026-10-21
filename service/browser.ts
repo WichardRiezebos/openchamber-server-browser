@@ -748,6 +748,7 @@ export class ServerBrowser {
     this.restartTimer = setTimeout(() => {
       this.restartTimer = null;
       if (tab.id !== this.shownTabId || !this.tabs.has(tab.id)) return;
+      if (!this.screencastActive) return; // The stream is idle-stopped; a returning viewer restarts it with a fresh picture.
       void (async () => {
         await this.send('Page.stopScreencast', {}, tab.sessionId).catch(() => undefined);
         await this.send('Page.startScreencast', {
